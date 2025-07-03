@@ -91,14 +91,16 @@ def detectar_poligonos(img_colorida, img_bordas, output_img):
     for cnt in contours:
         # Filtro por área mínima para remover ruído
         area = cv.contourArea(cnt)
-        if area < 250:  # Este valor pode precisar de ajuste
+
+        if area < 500:  # Este valor pode precisar de ajuste
             continue
 
         # Aproxima o contorno para um polígono
         perimetro = cv.arcLength(cnt, True)
+
         # O segundo parâmetro (epsilon) controla a precisão da aproximação.
         # Um valor comum é 2-4% do perímetro.
-        epsilon = 0.03 * perimetro 
+        epsilon = 0.02 * perimetro 
         approx = cv.approxPolyDP(cnt, epsilon, True)
 
         # Obter a caixa delimitadora para analisar a cor
@@ -106,6 +108,15 @@ def detectar_poligonos(img_colorida, img_bordas, output_img):
 
         # Identificar a forma pelo número de vértices
         num_vertices = len(approx)
+
+        # NOVO FILTRO: Solidez - um dos mais importantes!
+        hull = cv.convexHull(cnt)
+        hull_area = cv.contourArea(hull)
+        solidity = float(area) / hull_area if hull_area > 0 else 0
+
+        # Ignora formas não-sólidas (com solidez < 0.9)
+        # if solidity < 0.90:
+        #     continue
 
         forma_detectada = ""
         cor_validada = False
@@ -139,15 +150,42 @@ def detectar_poligonos(img_colorida, img_bordas, output_img):
                 cor_validada = True
 
         # Se a forma e a cor foram validadas, desenhe na imagem de saída
-        # if cor_validada:
-        print(f"Detectado polígono: {forma_detectada}")
-        # Desenha o contorno
-        cv.drawContours(output_img, [approx], -1, (255, 0, 255), 3)
-        # Escreve o nome da forma
-        cv.putText(output_img, forma_detectada, (x, y - 10), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+        if cor_validada:
+            print(f"Detectado polígono: {forma_detectada}")
+            # Desenha o contorno
+            cv.drawContours(output_img, [approx], -1, (255, 0, 255), 3)
+            # Escreve o nome da forma
+            cv.putText(output_img, forma_detectada, (x, y - 10), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+
+def segmentar_por_bordas(img):
+    # 2. Conversão para escala de cinza, equalização de histograma para melhorar contraste e suavização
+    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+
+    equ = cv.equalizeHist(gray)
+
+    blur = cv.GaussianBlur(equ, (15, 15), 0)
+
+    # 3. Aplicar operador de Sobel (X e Y)
+    gx = cv.Sobel(blur, cv.CV_32F, 1, 0, ksize=3)
+    gy = cv.Sobel(blur, cv.CV_32F, 0, 1, ksize=3)
+
+    # 4. Magnitude do gradiente e binarização
+    #    Usamos cv.magnitude para calcular a magnitude do gradiente
+    #    e cv.threshold para binarizar a imagem resultante
+    #    O valor 34 foi escolhido empiricamente para destacar as bordas
+    grad = cv.magnitude(gx, gy)
+    _, grad_thresh = cv.threshold(grad, 34, 255, cv.THRESH_BINARY_INV)
+
+    # 5. Detecção de bordas (Canny)
+    edges = cv.Canny(np.uint8(grad_thresh), 120, 240)
 
 def segmentar_por_cor(img):
+        # 0. Saturação da imagem
+    #    A saturação é uma medida de intensidade de cor.
+    #    Aumentar a saturação pode ajudar a destacar as cores das placas.
+    #    A saturação é ajustada para 1.5 vezes o valor original.
     hsv = cv.cvtColor(img, cv.COLOR_BGR2HSV)
+    # hsv[..., 1] = cv.normalize(hsv[..., 1], None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX)
 
     # Intervalos de Cor (Vermelho, Amarelo, Azul)
     # Vermelho
@@ -167,13 +205,44 @@ def segmentar_por_cor(img):
     final_color_mask = cv.bitwise_or(red_mask, yellow_mask)
     final_color_mask = cv.bitwise_or(final_color_mask, blue_mask)
     
-    # Aplica um desfoque na máscara para suavizar e fechar pequenos buracos
-    final_color_mask = cv.GaussianBlur(final_color_mask, (5, 5), 0)
+    return final_color_mask
 
-    return blue_mask
+def segmentar_por_filtro_morfologico(img):
+    """
+    Aplica segmentação por cor seguida de operações morfológicas para
+    criar uma máscara binária limpa das placas de trânsito.
 
-def segmentar_por_morfologia(img):
-    return
+    Args:
+        img_colorida: A imagem original em BGR.
+
+    Returns:
+        mascara_final: Uma máscara binária onde as placas são blobs brancos sólidos.
+    """
+    # 1. Segmentação por cor
+    #    Usamos a função segmentar_por_cor para criar uma máscara de cor
+    #    A máscara resultante é uma imagem binária onde as placas são brancas
+    #    e o fundo é preto.
+    cor = segmentar_por_cor(img)
+
+    # Define um kernel para operações morfológicas
+    #   ksize = (largura, altura)
+    #   outras opções: cv.MORPH_ELLIPSE, cv.MORPH_CROSS
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, (3, 3))
+
+    # Aplica operação morfologica
+    # 1. Abertura: Remove pequenos objetos do fundo
+    abertura = cv.morphologyEx(cor, cv.MORPH_OPEN, kernel, iterations=1)
+    fechamento = cv.morphologyEx(abertura, cv.MORPH_CLOSE, kernel, iterations=1)
+
+    # 2. Fechamento: Preenche pequenos buracos dentro dos objetos
+
+    # cv.imshow("Segmentação por Cor", cor)
+    # cv.imshow("Abertura", abertura)
+    # cv.imshow("Fechamento", fechamento)
+    # cv.waitKey(0)
+    # cv.destroyAllWindows()
+
+    return fechamento 
 
 def find(img_path, janela):
     # 1. Leitura
@@ -183,31 +252,9 @@ def find(img_path, janela):
 
     if img is None:
         raise FileNotFoundError(f"Não foi possível ler a imagem em {img_path}")
-    
-    # 2. Conversão para escala de cinza, equalização de histograma para melhorar contraste e suavização
-    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
 
-    equ = cv.equalizeHist(gray)
-
-    blur = cv.GaussianBlur(equ, (15, 15), 0)
-
-    # 3. Aplicar operador de Sobel (X e Y)
-    gx = cv.Sobel(blur, cv.CV_32F, 1, 0, ksize=3)
-    gy = cv.Sobel(blur, cv.CV_32F, 0, 1, ksize=3)
-
-    # 4. Magnitude do gradiente e binarização
-    #    Usamos cv.magnitude para calcular a magnitude do gradiente
-    #    e cv.threshold para binarizar a imagem resultante
-    #    O valor 34 foi escolhido empiricamente para destacar as bordas
-    grad = cv.magnitude(gx, gy)
-    _, grad_thresh = cv.threshold(grad, 34, 255, cv.THRESH_BINARY_INV)
-
-    # 5. Segmentação por cor (Vermelho, Amarelo, Azul)
-    #    Usamos a função segmentar_por_cor para criar uma máscara de cor
-    cor_mask = segmentar_por_cor(img)
-    
-    # 5. Detecção de bordas (Canny)
-    # edges = cv.Canny(np.uint8(grad_thresh), 120, 240)
+    # Segmentação por filtros morfológicos
+    morf = segmentar_por_filtro_morfologico(img)
     
     # ========== Detecção de Círculos ==========
     #    Usamos a Transformada de Hough para detectar círculos
@@ -216,16 +263,16 @@ def find(img_path, janela):
     # detectar_circulos(img, edges, output)
     
     # ========== Detecção de polígonos que podem ser placas ========== 
-    # detectar_poligonos(img, edges, output)
+    detectar_poligonos(img, morf, output)
     
     # 8. Exibe janela com o gradiente e com os círculos
     if janela == 1:
-        cv.imshow("Imagem", img)
-        # cv.imshow("Bordas", edges)
-        cv.imshow("Máscara", cor_mask)
-        # cv.imshow("Gradiente", grad_thresh)
-        # cv.imshow("Gaussian", blur)
-        # cv.imshow("Circulos Detectados", output)
+        # Pega a máscara de cor base para comparação
+        mascara_base_para_ver = cv.bitwise_or(cv.inRange(cv.cvtColor(img, cv.COLOR_BGR2HSV), np.array([0, 120, 70]), np.array([180, 255, 255])),cv.inRange(cv.cvtColor(img, cv.COLOR_BGR2HSV), np.array([20, 100, 100]), np.array([40, 255, 255])))
+
+        cv.imshow("1 - Mascara de Cor (com buracos)", mascara_base_para_ver)
+        cv.imshow("2 - Mascara Morfologica Final (limpa)", morf)
+        cv.imshow("3 - Placas Detectadas", output)
         cv.waitKey(0)
         cv.destroyAllWindows()
     
@@ -246,7 +293,8 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
 
-    janela = int(input("Quer ver janelas? (1 = sim, 0 = não): "))
+    # janela = int(input("Quer ver janelas? (1 = sim, 0 = não): "))
+    janela = 1
 
     if os.path.isdir(args.imagem):
         processar_varias_imagens(args.imagem, janela)
