@@ -2,8 +2,10 @@ import cv2 as cv
 import numpy as np
 import argparse
 import os
-
 from sklearn.cluster import KMeans
+
+from utils.mascaras import color_segmentation
+from utils.preProcess import contrast_enhance
 
 # Nomes arquivos
 BLUR = "blur.jpg"
@@ -17,6 +19,7 @@ paths = [
     GRADIENTE,
     OUTPUT
 ]
+
 
 def concatenar_paths(base_name):
     """
@@ -63,31 +66,15 @@ def detectar_circulos(img_colorida, img_bordas, output_img):
     else:
         print("Nenhum círculo detectado.")
 
-def detectar_poligonos(img_colorida, img_bordas, output_img):
+def extrair_poligonos(img_colorida, img_bordas, output_img):
     """
     Encontra, analisa e desenha polígonos (triângulos, retângulos, octógonos)
     que se assemelham a placas de trânsito.
     """
+    imgs = []
     # 1. Encontrar todos os contornos na imagem de bordas
     # cv.RETR_EXTERNAL é útil para pegar apenas os contornos externos
     contours, _ = cv.findContours(img_bordas, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-
-    # 2. Preparar máscaras de cor para validação (vermelho e amarelo)
-    hsv = cv.cvtColor(img_colorida, cv.COLOR_BGR2HSV)
-    
-    # Vermelho (para placas PARE, Dê a Preferência, etc.)
-    lower_red1 = np.array([0, 120, 70])
-    upper_red1 = np.array([10, 255, 255])
-    mask_r1 = cv.inRange(hsv, lower_red1, upper_red1)
-    lower_red2 = np.array([170, 120, 70])
-    upper_red2 = np.array([180, 255, 255])
-    mask_r2 = cv.inRange(hsv, lower_red2, upper_red2)
-    red_mask = mask_r1 + mask_r2
-
-    # Amarelo (para placas de advertência)
-    lower_yellow = np.array([20, 100, 100])
-    upper_yellow = np.array([30, 255, 255])
-    yellow_mask = cv.inRange(hsv, lower_yellow, upper_yellow)
 
     # 3. Iterar sobre cada contorno encontrado
     for cnt in contours:
@@ -106,58 +93,37 @@ def detectar_poligonos(img_colorida, img_bordas, output_img):
         approx = cv.approxPolyDP(cnt, epsilon, True)
 
         # Obter a caixa delimitadora para analisar a cor
-        x, y, w, h = cv.boundingRect(approx)
+        x, y, w, h = cv.boundingRect(cnt)
 
+        height, width = img_colorida.shape[:2]
+        y1 = max(y - 20, 0)
+        y2 = min(y + h + 20, height)
+        x1 = max(x - 20, 0)
+        x2 = min(x + w + 20, width)
+        placa_cortada = img_colorida[y:y+h, x:x+w]
+
+        imgs.append(placa_cortada)
+
+    return imgs
+
+        # cv.imshow("Placa Cortada", placa_cortada)
+        # cv.waitKey(0)
         # Identificar a forma pelo número de vértices
-        num_vertices = len(approx)
+        # num_vertices = len(approx)
 
         # NOVO FILTRO: Solidez - um dos mais importantes!
-        hull = cv.convexHull(cnt)
-        hull_area = cv.contourArea(hull)
-        solidity = float(area) / hull_area if hull_area > 0 else 0
+        # hull = cv.convexHull(cnt)
+        # hull_area = cv.contourArea(hull)
+        # solidity = float(area) / hull_area if hull_area > 0 else 0
 
         # Ignora formas não-sólidas (com solidez < 0.9)
         # if solidity < 0.90:
         #     continue
 
-        forma_detectada = ""
-        cor_validada = False
-
-        # É um octógono? (Placa PARE)
-        if num_vertices == 8:
-            # Validar pela cor vermelha
-            roi = red_mask[y:y+h, x:x+w]
-            # Se mais de 50% da área do contorno for vermelha
-            if cv.countNonZero(roi) / area > 0.5:
-                forma_detectada = "PARE (Octogono)"
-                cor_validada = True
-
-        # É um quadrado/retângulo? (Placas de Advertência)
-        elif num_vertices == 4:
-            # Validar pela cor amarela
-            roi = yellow_mask[y:y+h, x:x+w]
-            if cv.countNonZero(roi) / area > 0.5:
-                forma_detectada = "Advertencia (Retangulo)"
-                cor_validada = True
-        
-        # É um triângulo? (Placa Dê a Preferência)
-        # NOTA: A placa "Dê a preferência" é um triângulo invertido. A detecção pode
-        # ser mais complexa, mas vamos começar com a forma básica.
-        elif num_vertices == 3:
-             # Validar pela cor vermelha (da borda)
-            roi = red_mask[y:y+h, x:x+w]
-            # Para bordas, a porcentagem de cor será menor
-            if cv.countNonZero(roi) / area > 0.1:
-                forma_detectada = "Preferencia (Triangulo)"
-                cor_validada = True
-
-        # Se a forma e a cor foram validadas, desenhe na imagem de saída
-        if cor_validada:
-            print(f"Detectado polígono: {forma_detectada}")
-            # Desenha o contorno
-            cv.drawContours(output_img, [approx], -1, (255, 0, 255), 3)
-            # Escreve o nome da forma
-            cv.putText(output_img, forma_detectada, (x, y - 10), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+        # Desenha o contorno
+        # cv.drawContours(output_img, [approx], -1, (255, 0, 255), 3)
+        # Escreve o nome da forma
+        # cv.putText(output_img, forma_detectada, (x, y - 10), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
 
 def segmentar_por_bordas(img):
     # 2. Conversão para escala de cinza, equalização de histograma para melhorar contraste e suavização
@@ -181,34 +147,6 @@ def segmentar_por_bordas(img):
     # 5. Detecção de bordas (Canny)
     edges = cv.Canny(np.uint8(grad_thresh), 120, 240)
 
-def segmentar_por_cor(img):
-        # 0. Saturação da imagem
-    #    A saturação é uma medida de intensidade de cor.
-    #    Aumentar a saturação pode ajudar a destacar as cores das placas.
-    #    A saturação é ajustada para 1.5 vezes o valor original.
-    hsv = cv.cvtColor(img, cv.COLOR_BGR2HSV)
-    # hsv[..., 1] = cv.normalize(hsv[..., 1], None, alpha=0, beta=255, norm_type=cv.NORM_MINMAX)
-
-    # Intervalos de Cor (Vermelho, Amarelo, Azul)
-    # Vermelho
-    lower_red1 = np.array([0, 120, 70]); upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 120, 70]); upper_red2 = np.array([180, 255, 255])
-    red_mask = cv.bitwise_or(cv.inRange(hsv, lower_red1, upper_red1), cv.inRange(hsv, lower_red2, upper_red2))
-
-    # Amarelo
-    lower_yellow = np.array([20, 100, 100]); upper_yellow = np.array([30, 255, 255])
-    yellow_mask = cv.inRange(hsv, lower_yellow, upper_yellow)
-
-    # Azul (placas de serviço/informação)
-    lower_blue = np.array([100, 150, 0]); upper_blue = np.array([140, 255, 255])
-    blue_mask = cv.inRange(hsv, lower_blue, upper_blue)
-
-    # Unifica todas as máscaras de cor em uma só
-    final_color_mask = cv.bitwise_or(red_mask, yellow_mask)
-    final_color_mask = cv.bitwise_or(final_color_mask, blue_mask)
-    
-    return final_color_mask
-
 def segmentar_por_filtro_morfologico(img):
     """
     Aplica segmentação por cor seguida de operações morfológicas para
@@ -220,31 +158,20 @@ def segmentar_por_filtro_morfologico(img):
     Returns:
         mascara_final: Uma máscara binária onde as placas são blobs brancos sólidos.
     """
-    # 1. Segmentação por cor
-    #    Usamos a função segmentar_por_cor para criar uma máscara de cor
-    #    A máscara resultante é uma imagem binária onde as placas são brancas
-    #    e o fundo é preto.
-    cor = segmentar_por_cor(img)
+    # Segmentação por cor
+    mascara = color_segmentation(img)
 
     # Define um kernel para operações morfológicas
-    #   ksize = (largura, altura)
-    #   outras opções: cv.MORPH_ELLIPSE, cv.MORPH_CROSS
-    kernel = cv.getStructuringElement(cv.MORPH_RECT, (3, 3))
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, (2, 2))
 
     # Aplica operação morfologica
     # 1. Abertura: Remove pequenos objetos do fundo
-    abertura = cv.morphologyEx(cor, cv.MORPH_OPEN, kernel, iterations=1)
-    fechamento = cv.morphologyEx(abertura, cv.MORPH_CLOSE, kernel, iterations=1)
+    # mascara = cv.morphologyEx(mascara, cv.MORPH_OPEN, kernel, iterations=1)
 
     # 2. Fechamento: Preenche pequenos buracos dentro dos objetos
+    mascara = cv.morphologyEx(mascara, cv.MORPH_CLOSE, kernel, iterations=1)
 
-    # cv.imshow("Segmentação por Cor", cor)
-    # cv.imshow("Abertura", abertura)
-    # cv.imshow("Fechamento", fechamento)
-    # cv.waitKey(0)
-    # cv.destroyAllWindows()
-
-    return fechamento 
+    return mascara 
 
 def find(img_path, janela):
     # 1. Leitura
@@ -254,6 +181,8 @@ def find(img_path, janela):
 
     if img is None:
         raise FileNotFoundError(f"Não foi possível ler a imagem em {img_path}")
+
+    img = contrast_enhance(img)
 
     # Segmentação por filtros morfológicos
     morf = segmentar_por_filtro_morfologico(img)
@@ -265,8 +194,17 @@ def find(img_path, janela):
     # detectar_circulos(img, edges, output)
     
     # ========== Detecção de polígonos que podem ser placas ========== 
-    detectar_poligonos(img, morf, output)
-    
+    imagens_cortadas = extrair_poligonos(img, morf, output)
+
+    for img_cortada in imagens_cortadas:
+        ret = extracao(img_cortada)
+        classifiqueido = classificacao(ret)
+        if classifiqueido != 0:
+            # cv.putText(output, f"Placa: {classifiqueido}", (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            print(f"Placa classificada como: {classifiqueido} com base nos parâmetros: {ret}")
+            cv.imshow("Placa Detectada", img_cortada)
+            cv.waitKey(0)
+
     # 8. Exibe janela com o gradiente e com os círculos
     if janela == 1:
         # Pega a máscara de cor base para comparação
@@ -313,6 +251,9 @@ def extracao(img):
     # Detectando contornos e selecionando o maior.
     contornos, _ = cv.findContours(bin_img, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
     contorno_principal = max(contornos, key=cv.contourArea)
+    cv.drawContours(img, [contorno_principal], -1, (0, 255, 0), 2)
+    cv.imshow("Contorno Principal", img)
+    cv.waitKey(0)
 
     # Calculando circularidade.
     area = cv.contourArea(contorno_principal)
@@ -355,12 +296,6 @@ def classificacao(vetor):
     elif vetor[3] == "amarelo" and vetor[4] == "preto":
         if (vetor[0] <= 0.5 and (vetor[1] >= 0.75 and vetor[1] <= 1.25)) or vetor[2] == 4:
             placa = 2
-    elif vetor[3] == "laranja" and vetor[4] == "preto":
-        if vetor[0] <= 0.5 or vetor[2] == 4:
-            placa = 4
-    else:
-        if vetor[0] <= 0.5 or vetor[2] == 4:
-            placa = 3
             
     return placa
 
