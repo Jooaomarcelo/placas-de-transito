@@ -3,6 +3,8 @@ import numpy as np
 import argparse
 import os
 
+from sklearn.cluster import KMeans
+
 # Nomes arquivos
 BLUR = "blur.jpg"
 BORDAS = "bordas.jpg"
@@ -361,6 +363,81 @@ def find(img_path, janela):
     # cv.imwrite(paths_concatenadas[1], edges)
     # cv.imwrite(paths_concatenadas[2], grad_thresh)
     cv.imwrite(paths_concatenadas[3], output)
+
+def cor_simples(rgb):
+    r, g, b = rgb
+
+    if r > 200 and g > 200 and b > 200:
+        return 'branco'
+    elif r < 50 and g < 50 and b < 50:
+        return 'preto'
+    elif r > 150 and g < 80 and b < 80:
+        return 'vermelho'
+    elif r > 180 and g > 180 and b < 100:
+        return 'amarelo'
+    elif r > 200 and 100 < g < 180 and b < 80:
+        return 'laranja'
+
+    return 'outra'
+
+def extracao(img):
+    # Convertendo para escala de cinza e binarizando.
+    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+    _, bin_img = cv.threshold(gray, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+
+    # Detectando contornos e selecionando o maior.
+    contornos, _ = cv.findContours(bin_img, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    contorno_principal = max(contornos, key=cv.contourArea)
+
+    # Calculando circularidade.
+    area = cv.contourArea(contorno_principal)
+    perimetro = cv.arcLength(contorno_principal, True)
+    circularidade = (4 * np.pi * area) / (perimetro ** 2) if perimetro != 0 else 0
+
+    # Calculando razao / largura.
+    x, y, w, h = cv.boundingRect(contorno_principal)
+    aspect_ratio = w / h if h != 0 else 0
+
+    # Aproximando vértices.
+    epsilon = 0.02 * perimetro
+    aproximado = cv.approxPolyDP(contorno_principal, epsilon, True)
+    num_vertices = len(aproximado)
+
+    # Identificando cores principais.
+    mascara = np.zeros_like(gray)
+    cv.drawContours(mascara, [contorno_principal], -1, 255, -1)
+
+    pixels = img[mascara == 255]
+
+    pixels_reshape = pixels.reshape(-1, 3).astype(np.float32)
+    kmeans = KMeans(n_clusters=2, n_init='auto')
+    kmeans.fit(pixels_reshape)
+    cores = kmeans.cluster_centers_.astype(int)
+
+    cor_principal = cor_simples(cores[0])
+    cor_secundaria = cor_simples(cores[1])
+
+    return [circularidade, aspect_ratio, num_vertices, cor_principal, cor_secundaria]
+
+def classificacao(vetor):
+    # Vetor: [circularidade, aspect radio, vertices, cor principal, cor secundaria].
+    
+    placa = 0   # Tipo da placa identificada, seguindo a lógica: [0: não é placa, 1: regulamentação, 2: advertência, 3: indicação, 4: sinalização temporária].
+
+    if vetor[3] in ["vermelho", "branco"] and vetor[4] in ["vermelho", "branco"]:
+        if vetor[0] >= 0.85 or (vetor[1] >= 0.75 and vetor[1] <= 1.25) or (vetor[2] == 3 or vetor[2] == 8):
+            placa = 1
+    elif vetor[3] == "amarelo" and vetor[4] == "preto":
+        if (vetor[0] <= 0.5 and (vetor[1] >= 0.75 and vetor[1] <= 1.25)) or vetor[2] == 4:
+            placa = 2
+    elif vetor[3] == "laranja" and vetor[4] == "preto":
+        if vetor[0] <= 0.5 or vetor[2] == 4:
+            placa = 4
+    else:
+        if vetor[0] <= 0.5 or vetor[2] == 4:
+            placa = 3
+            
+    return placa
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pipeline de detecção de placas sem IA")
